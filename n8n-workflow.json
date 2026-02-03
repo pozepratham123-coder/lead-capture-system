@@ -1,0 +1,342 @@
+{
+    "name": "Lead Capture & Notification System",
+    "nodes": [
+        {
+            "parameters": {
+                "httpMethod": "POST",
+                "path": "leads",
+                "responseMode": "responseNode",
+                "options": {}
+            },
+            "id": "webhook-intake",
+            "name": "Webhook - Lead Intake",
+            "type": "n8n-nodes-base.webhook",
+            "typeVersion": 1,
+            "position": [
+                250,
+                300
+            ],
+            "webhookId": "lead-capture-webhook"
+        },
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ {\"success\": true, \"message\": \"Lead received\", \"timestamp\": $now.toISO()} }}"
+            },
+            "id": "webhook-response",
+            "name": "Webhook Response",
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [
+                450,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "functionCode": "// ============================================================================\n// PAYLOAD VALIDATION & NORMALIZATION\n// ============================================================================\n// This node validates the incoming webhook payload and ensures data quality\n// before processing. It handles missing/malformed data gracefully.\n\nconst item = $input.item.json;\n\n// Extract body (handles both direct body and nested structures)\nconst body = item.body || item;\n\n// Required fields - at least email or phone must exist\nconst email = (body.email || '').trim().toLowerCase();\nconst phone = (body.phone || '').trim();\n\n// If neither email nor phone exists, this is invalid\nif (!email && !phone) {\n  return {\n    json: {\n      valid: false,\n      reason: 'Missing both email and phone',\n      rawData: body\n    }\n  };\n}\n\n// Normalize and validate data\nconst normalized = {\n  // Core lead data (with defaults for missing fields)\n  name: (body.name || 'Unknown').trim(),\n  email: email || 'N/A',\n  phone: phone || 'N/A',\n  message: (body.message || '').trim(),\n  \n  // Contextual data\n  sourceUrl: body.sourceUrl || 'Unknown',\n  pageTitle: body.pageTitle || 'Unknown',\n  referrer: body.referrer || 'Direct',\n  customerId: body.customerId || 'unknown',\n  \n  // Technical metadata\n  userAgent: body.userAgent || 'Unknown',\n  screenResolution: body.screenResolution || 'Unknown',\n  formId: body.formId || 'unknown-form',\n  \n  // Spam detection helpers\n  honeypotValue: body.honeypotValue || '',\n  submissionMethod: body.submissionMethod || 'traditional',\n  \n  // Timestamps\n  submittedAt: body.timestamp || new Date().toISOString(),\n  processedAt: new Date().toISOString(),\n  \n  // Raw data for debugging\n  rawFields: body.rawFields || {},\n  \n  // Validation flag\n  valid: true\n};\n\nreturn { json: normalized };"
+            },
+            "id": "validate-normalize",
+            "name": "Validate & Normalize Payload",
+            "type": "n8n-nodes-base.function",
+            "typeVersion": 1,
+            "position": [
+                650,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "functionCode": "// ============================================================================\n// SPAM DETECTION ENGINE\n// ============================================================================\n// Multi-factor spam scoring system with explainable logic\n// Score >= 50 = Possible Spam, Score < 50 = New Lead\n\nconst lead = $input.item.json;\nlet spamScore = 0;\nconst signals = [];\n\n// ============================================================================\n// SIGNAL 1: Disposable Email Domains (30 points)\n// ============================================================================\nconst disposableDomains = [\n  'tempmail.com', 'guerrillamail.com', '10minutemail.com', 'throwaway.email',\n  'mailinator.com', 'maildrop.cc', 'trashmail.com', 'yopmail.com',\n  'temp-mail.org', 'fakeinbox.com', 'sharklasers.com', 'getnada.com'\n];\n\nconst emailDomain = lead.email.split('@')[1];\nif (disposableDomains.includes(emailDomain)) {\n  spamScore += 30;\n  signals.push('Disposable email domain detected');\n}\n\n// ============================================================================\n// SIGNAL 2: Honeypot Field Filled (40 points)\n// ============================================================================\n// If honeypot field has a value, it's almost certainly a bot\nif (lead.honeypotValue && lead.honeypotValue.trim().length > 0) {\n  spamScore += 40;\n  signals.push('Honeypot field was filled (likely bot)');\n}\n\n// ============================================================================\n// SIGNAL 3: Missing Critical Fields (20 points)\n// ============================================================================\n// Spam often has email but missing name AND message\nconst hasName = lead.name && lead.name !== 'Unknown' && lead.name.length > 1;\nconst hasMessage = lead.message && lead.message.length > 5;\n\nif (!hasName && !hasMessage) {\n  spamScore += 20;\n  signals.push('Missing both name and message');\n}\n\n// ============================================================================\n// SIGNAL 4: Suspicious Email Patterns (25 points)\n// ============================================================================\n// Common spam patterns: random characters, numbers only, etc.\nconst emailLocalPart = lead.email.split('@')[0];\n\n// Check for excessive numbers (e.g., user123456789@example.com)\nconst numberRatio = (emailLocalPart.match(/\\d/g) || []).length / emailLocalPart.length;\nif (numberRatio > 0.6) {\n  spamScore += 15;\n  signals.push('Email contains excessive numbers');\n}\n\n// Check for very short email (e.g., a@b.com)\nif (emailLocalPart.length < 3) {\n  spamScore += 10;\n  signals.push('Suspiciously short email address');\n}\n\n// ============================================================================\n// SIGNAL 5: Spam Keywords in Message (15 points)\n// ============================================================================\nconst spamKeywords = [\n  'buy now', 'click here', 'free money', 'earn cash', 'lose weight',\n  'viagra', 'casino', 'lottery', 'nigerian prince', 'act now',\n  'limited time', 'special promotion', 'congratulations', 'you won'\n];\n\nconst messageLower = lead.message.toLowerCase();\nconst matchedKeywords = spamKeywords.filter(keyword => messageLower.includes(keyword));\n\nif (matchedKeywords.length > 0) {\n  spamScore += 15;\n  signals.push(`Spam keywords detected: ${matchedKeywords.join(', ')}`);\n}\n\n// ============================================================================\n// SIGNAL 6: Suspicious Name Patterns (10 points)\n// ============================================================================\n// Check for single character names, all numbers, etc.\nif (hasName) {\n  if (lead.name.length === 1) {\n    spamScore += 5;\n    signals.push('Single character name');\n  }\n  \n  if (/^\\d+$/.test(lead.name)) {\n    spamScore += 5;\n    signals.push('Name is all numbers');\n  }\n}\n\n// ============================================================================\n// CLASSIFICATION\n// ============================================================================\nconst threshold = 50;\nconst classification = spamScore >= threshold ? 'Possible Spam' : 'New Lead';\n\n// Return enriched lead with spam analysis\nreturn {\n  json: {\n    ...lead,\n    spamScore: spamScore,\n    spamSignals: signals,\n    status: classification,\n    confidence: spamScore >= 70 ? 'High' : spamScore >= 50 ? 'Medium' : 'Low'\n  }\n};"
+            },
+            "id": "spam-detection",
+            "name": "Spam Detection Engine",
+            "type": "n8n-nodes-base.function",
+            "typeVersion": 1,
+            "position": [
+                850,
+                300
+            ]
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "string": [
+                        {
+                            "value1": "={{ $json.valid }}",
+                            "operation": "equals",
+                            "value2": "true"
+                        }
+                    ]
+                }
+            },
+            "id": "check-valid",
+            "name": "Is Valid?",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 1,
+            "position": [
+                450,
+                400
+            ],
+            "alwaysOutputData": false
+        },
+        {
+            "parameters": {
+                "authentication": "oAuth2",
+                "operation": "append",
+                "sheetId": "={{ $env.GOOGLE_SHEET_ID }}",
+                "range": "Leads!A:N",
+                "options": {
+                    "valueInputMode": "USER_ENTERED"
+                },
+                "columns": {
+                    "mappings": [
+                        {
+                            "fromColumn": "name",
+                            "toColumn": "Name"
+                        },
+                        {
+                            "fromColumn": "phone",
+                            "toColumn": "Phone Number"
+                        },
+                        {
+                            "fromColumn": "email",
+                            "toColumn": "Email Address"
+                        },
+                        {
+                            "fromColumn": "message",
+                            "toColumn": "Lead Details"
+                        },
+                        {
+                            "fromColumn": "status",
+                            "toColumn": "Status"
+                        },
+                        {
+                            "fromColumn": "sourceUrl",
+                            "toColumn": "Submission URL"
+                        },
+                        {
+                            "fromColumn": "referrer",
+                            "toColumn": "Lead Source"
+                        },
+                        {
+                            "fromColumn": "customerId",
+                            "toColumn": "Customer Name"
+                        },
+                        {
+                            "fromColumn": "submittedAt",
+                            "toColumn": "Created At"
+                        },
+                        {
+                            "fromColumn": "processedAt",
+                            "toColumn": "Updated At"
+                        },
+                        {
+                            "fromColumn": "spamScore",
+                            "toColumn": "Spam Score"
+                        },
+                        {
+                            "fromColumn": "pageTitle",
+                            "toColumn": "Page Title"
+                        },
+                        {
+                            "fromColumn": "formId",
+                            "toColumn": "Form ID"
+                        },
+                        {
+                            "fromColumn": "userAgent",
+                            "toColumn": "User Agent"
+                        }
+                    ]
+                }
+            },
+            "id": "google-sheets-append",
+            "name": "Append to Google Sheets",
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 3,
+            "position": [
+                1050,
+                300
+            ],
+            "credentials": {
+                "googleSheetsOAuth2Api": {
+                    "id": "1",
+                    "name": "Google Sheets OAuth2"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "conditions": {
+                    "string": [
+                        {
+                            "value1": "={{ $json.status }}",
+                            "operation": "equals",
+                            "value2": "New Lead"
+                        }
+                    ]
+                }
+            },
+            "id": "check-status",
+            "name": "Is New Lead?",
+            "type": "n8n-nodes-base.if",
+            "typeVersion": 1,
+            "position": [
+                1250,
+                300
+            ],
+            "alwaysOutputData": false
+        },
+        {
+            "parameters": {
+                "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL || 'leads@yourcompany.com' }}",
+                "toEmail": "={{ $json.customerEmail || 'admin@yourcompany.com' }}",
+                "subject": "🎯 New Lead: {{ $json.name }} from {{ $json.customerId }}",
+                "emailType": "html",
+                "message": "<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }\n    .content { background: #f9f9f9; padding: 20px; }\n    .lead-info { background: white; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #667eea; }\n    .field { margin: 10px 0; }\n    .label { font-weight: bold; color: #555; }\n    .value { color: #333; }\n    .footer { background: #333; color: white; padding: 15px; text-align: center; border-radius: 0 0 8px 8px; font-size: 12px; }\n    .button { display: inline-block; padding: 12px 24px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 10px 0; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <h1>🎯 New Lead Captured!</h1>\n      <p>A new lead has been submitted from <strong>{{ $json.customerId }}</strong></p>\n    </div>\n    \n    <div class=\"content\">\n      <div class=\"lead-info\">\n        <div class=\"field\">\n          <span class=\"label\">Name:</span>\n          <span class=\"value\">{{ $json.name }}</span>\n        </div>\n        <div class=\"field\">\n          <span class=\"label\">Email:</span>\n          <span class=\"value\"><a href=\"mailto:{{ $json.email }}\">{{ $json.email }}</a></span>\n        </div>\n        <div class=\"field\">\n          <span class=\"label\">Phone:</span>\n          <span class=\"value\"><a href=\"tel:{{ $json.phone }}\">{{ $json.phone }}</a></span>\n        </div>\n        <div class=\"field\">\n          <span class=\"label\">Message:</span>\n          <div class=\"value\" style=\"margin-top: 5px; padding: 10px; background: #f5f5f5; border-radius: 4px;\">\n            {{ $json.message || 'No message provided' }}\n          </div>\n        </div>\n      </div>\n      \n      <div class=\"lead-info\">\n        <h3>📊 Lead Source</h3>\n        <div class=\"field\">\n          <span class=\"label\">Page:</span>\n          <span class=\"value\">{{ $json.pageTitle }}</span>\n        </div>\n        <div class=\"field\">\n          <span class=\"label\">URL:</span>\n          <span class=\"value\"><a href=\"{{ $json.sourceUrl }}\">{{ $json.sourceUrl }}</a></span>\n        </div>\n        <div class=\"field\">\n          <span class=\"label\">Referrer:</span>\n          <span class=\"value\">{{ $json.referrer }}</span>\n        </div>\n        <div class=\"field\">\n          <span class=\"label\">Form ID:</span>\n          <span class=\"value\">{{ $json.formId }}</span>\n        </div>\n      </div>\n      \n      <div class=\"lead-info\">\n        <h3>⏰ Timestamp</h3>\n        <div class=\"field\">\n          <span class=\"label\">Submitted:</span>\n          <span class=\"value\">{{ $json.submittedAt }}</span>\n        </div>\n      </div>\n      \n      <div style=\"text-align: center; margin: 20px 0;\">\n        <a href=\"{{ $env.GOOGLE_SHEET_URL || '#' }}\" class=\"button\">View in Google Sheets</a>\n      </div>\n    </div>\n    \n    <div class=\"footer\">\n      <p>This is an automated notification from your Lead Capture System</p>\n      <p>Spam Score: {{ $json.spamScore }} ({{ $json.confidence }} confidence)</p>\n    </div>\n  </div>\n</body>\n</html>",
+                "options": {}
+            },
+            "id": "send-notification",
+            "name": "Send Email Notification - New Lead",
+            "type": "n8n-nodes-base.emailSend",
+            "typeVersion": 2,
+            "position": [
+                1450,
+                200
+            ],
+            "credentials": {
+                "smtp": {
+                    "id": "2",
+                    "name": "SMTP Account"
+                }
+            }
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "// Log spam detection for monitoring\nconst lead = $input.item.json;\n\nconsole.log('========================================');\nconsole.log('POSSIBLE SPAM DETECTED');\nconsole.log('========================================');\nconsole.log('Email:', lead.email);\nconsole.log('Spam Score:', lead.spamScore);\nconsole.log('Signals:', lead.spamSignals.join(', '));\nconsole.log('Customer:', lead.customerId);\nconsole.log('========================================');\n\nreturn { json: lead };"
+            },
+            "id": "log-spam",
+            "name": "Log Possible Spam",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 1,
+            "position": [
+                1450,
+                400
+            ]
+        },
+        {
+            "parameters": {
+                "mode": "runOnceForEachItem",
+                "jsCode": "// Store customer configuration\n// In production, this would be stored in a database or environment variables\n// For now, we'll use a simple mapping\n\nconst customerConfig = {\n  'acme-corp': {\n    email: 'sales@acme-corp.com',\n    name: 'ACME Corporation'\n  },\n  'beta-inc': {\n    email: 'leads@beta-inc.com',\n    name: 'Beta Inc'\n  },\n  'gamma-llc': {\n    email: 'contact@gamma-llc.com',\n    name: 'Gamma LLC'\n  }\n};\n\nconst lead = $input.item.json;\nconst config = customerConfig[lead.customerId] || {\n  email: process.env.DEFAULT_NOTIFICATION_EMAIL || 'admin@yourcompany.com',\n  name: lead.customerId\n};\n\nreturn {\n  json: {\n    ...lead,\n    customerEmail: config.email,\n    customerName: config.name\n  }\n};"
+            },
+            "id": "lookup-customer",
+            "name": "Lookup Customer Config",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 1,
+            "position": [
+                1050,
+                200
+            ]
+        }
+    ],
+    "connections": {
+        "Webhook - Lead Intake": {
+            "main": [
+                [
+                    {
+                        "node": "Webhook Response",
+                        "type": "main",
+                        "index": 0
+                    },
+                    {
+                        "node": "Validate & Normalize Payload",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Validate & Normalize Payload": {
+            "main": [
+                [
+                    {
+                        "node": "Is Valid?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Is Valid?": {
+            "main": [
+                [
+                    {
+                        "node": "Spam Detection Engine",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Spam Detection Engine": {
+            "main": [
+                [
+                    {
+                        "node": "Append to Google Sheets",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Append to Google Sheets": {
+            "main": [
+                [
+                    {
+                        "node": "Is New Lead?",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Is New Lead?": {
+            "main": [
+                [
+                    {
+                        "node": "Lookup Customer Config",
+                        "type": "main",
+                        "index": 0
+                    }
+                ],
+                [
+                    {
+                        "node": "Log Possible Spam",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        },
+        "Lookup Customer Config": {
+            "main": [
+                [
+                    {
+                        "node": "Send Email Notification - New Lead",
+                        "type": "main",
+                        "index": 0
+                    }
+                ]
+            ]
+        }
+    },
+    "settings": {
+        "executionOrder": "v1"
+    },
+    "staticData": null,
+    "tags": [],
+    "triggerCount": 1,
+    "updatedAt": "2026-02-02T07:49:08.000Z",
+    "versionId": "1"
+}
